@@ -40,6 +40,15 @@ jobs:
             os: ubuntu-latest
             name: linux
             extension: dll
+          # macOS targets
+          - target: x86_64-apple-darwin
+            os: macos-13
+            name: osx64
+            extension: dll
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: osx64
+            extension: dll
 
     steps:
     - name: Checkout code
@@ -114,6 +123,17 @@ jobs:
 
         # Copy and rename for client
         cp "target/${{ matrix.target }}/release/libgm_ollama.so" "artifacts/gmcl_ollama_${{ matrix.name }}.dll"
+
+    - name: Prepare artifacts (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        mkdir -p artifacts
+
+        # Copy and rename for server (macOS uses .dll extension for GMod modules)
+        cp "target/${{ matrix.target }}/release/libgm_ollama.dylib" "artifacts/gmsv_ollama_${{ matrix.name }}.dll"
+
+        # Copy and rename for client
+        cp "target/${{ matrix.target }}/release/libgm_ollama.dylib" "artifacts/gmcl_ollama_${{ matrix.name }}.dll"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
