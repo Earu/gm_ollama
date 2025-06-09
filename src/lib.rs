@@ -803,7 +803,11 @@ unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
     let queue = get_callback_queue();
     let mut callbacks = queue.lock().unwrap();
 
-            for callback_result in callbacks.drain(..) {
+    for callback_result in callbacks.drain(..) {
+        // Push error handler function that calls ErrorNoHaltWithStack
+        lua.get_global(lua_string!("ErrorNoHaltWithStack"));
+        let error_handler_index = lua.get_top();
+
         lua.from_reference(callback_result.callback_ref);
 
         match callback_result.data {
@@ -814,7 +818,7 @@ unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
                 lua.set_field(-2, lua_string!("response"));
                 lua.push_string(&model);
                 lua.set_field(-2, lua_string!("model"));
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
             CallbackData::Chat { content, role, model } => {
                 lua.push_nil(); // No error
@@ -825,7 +829,7 @@ unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
                 lua.set_field(-2, lua_string!("role"));
                 lua.push_string(&model);
                 lua.set_field(-2, lua_string!("model"));
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
             CallbackData::ListModels { models } => {
                 lua.push_nil(); // No error
@@ -848,7 +852,7 @@ unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
 
                     lua.set_table(-3);
                 }
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
             CallbackData::GetModelInfo { license, modelfile, parameters, template } => {
                 lua.push_nil(); // No error
@@ -861,12 +865,12 @@ unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
                 lua.set_field(-2, lua_string!("parameters"));
                 lua.push_string(&template);
                 lua.set_field(-2, lua_string!("template"));
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
             CallbackData::IsModelAvailable { is_available } => {
                 lua.push_nil(); // No error
                 lua.push_boolean(is_available);
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
             CallbackData::Embeddings { model, embeddings } => {
                 lua.push_nil(); // No error
@@ -888,7 +892,7 @@ unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
                 }
                 lua.set_field(-2, lua_string!("embeddings"));
 
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
             CallbackData::GetRunningModels { models } => {
                 lua.push_nil(); // No error
@@ -921,14 +925,17 @@ unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
 
                     lua.set_table(-3);
                 }
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
             CallbackData::Error { message } => {
                 lua.push_string(&message); // Error message
                 lua.push_nil();
-                lua.call(2, 0);
+                let _ = lua.pcall(2, 0, error_handler_index);
             },
         }
+
+        // Clean up error handler from stack
+        lua.pop();
 
         lua.dereference(callback_result.callback_ref);
     }
