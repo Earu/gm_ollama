@@ -104,7 +104,7 @@ jobs:
         cp "target/${{ matrix.target }}/release/libgm_ollama.so" "artifacts/gmcl_ollama_${{ matrix.name }}.dll"
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: gm_ollama_${{ matrix.name }}
         path: artifacts/*
@@ -118,7 +118,7 @@ jobs:
 
     steps:
     - name: Download all artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
 
     - name: Prepare release assets
       run: |
@@ -150,7 +150,7 @@ jobs:
 
     steps:
     - name: Download all artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
 
     - name: Prepare development release
       run: |
@@ -165,7 +165,7 @@ jobs:
         cd ..
 
     - name: Upload development build
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: gm_ollama_development
         path: gm_ollama_dev_*.zip
