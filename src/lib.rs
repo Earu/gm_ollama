@@ -363,13 +363,10 @@ unsafe fn ollama_chat(lua: gmod::lua::State) -> i32 {
         lua.error("Second argument must be a table of messages");
     }
 
-        let mut messages = Vec::new();
-
-    // Iterate through table indices until we hit nil
-    let mut i = 1;
-    loop {
-        lua.push_integer(i as isize);
-        lua.get_table(2);
+    let mut messages = Vec::new();
+    let len = lua.len(2);
+    for i in 1..=len {
+        lua.raw_geti(2, i as i32); // Get the table entry at index i
 
         if lua.is_table(-1) {
             lua.get_field(-1, lua_string!("role"));
@@ -386,17 +383,9 @@ unsafe fn ollama_chat(lua: gmod::lua::State) -> i32 {
         }
 
         lua.pop(); // Pop table entry
-
-        // If this index was nil, we've reached the end
-        if lua.is_nil(-1) {
-            lua.pop();
-            break;
-        }
-
-        i += 1;
     }
 
-        // Callback function is required
+    // Callback function is required
     if lua.get_top() < 3 || !lua.is_function(3) {
         lua.error("Callback function is required");
     }
