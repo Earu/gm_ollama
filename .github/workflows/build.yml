@@ -47,7 +47,7 @@ jobs:
             extension: dll
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: osx64
+            name: osxarm64
             extension: dll
 
     steps:
