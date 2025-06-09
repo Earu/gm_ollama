@@ -29,6 +29,7 @@ A Garry's Mod binary module that provides Lua bindings for the [Ollama](https://
    - Windows (64-bit): `gmsv_ollama_win64.dll` (server) or `gmcl_ollama_win64.dll` (client)
    - Linux (64-bit): `gmsv_ollama_linux64.dll` (server) or `gmcl_ollama_linux64.dll` (client)
    - Windows (32-bit): `gmsv_ollama_win32.dll` (server) or `gmcl_ollama_win32.dll` (client)
+   - Linux (32-bit): `gmsv_ollama_linux.dll` (server) or `gmcl_ollama_linux.dll` (client)
 
 ## API Reference
 
