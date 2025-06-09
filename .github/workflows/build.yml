@@ -46,6 +46,15 @@ jobs:
       with:
         targets: ${{ matrix.target }}
 
+    - name: Verify and install Rust target
+      run: |
+        echo "Available targets:"
+        rustup target list --installed
+        echo "Adding target if not present:"
+        rustup target add ${{ matrix.target }}
+        echo "Installed targets:"
+        rustup target list --installed
+
     - name: Install Linux dependencies (32-bit)
       if: matrix.target == 'i686-unknown-linux-gnu'
       run: |
