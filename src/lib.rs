@@ -201,44 +201,54 @@ fn normalize_model_name(model_name: &str) -> String {
     }
 }
 
-unsafe fn get_config() -> &'static OllamaConfig {
-    CONFIG.get_or_insert_with(OllamaConfig::default)
+fn get_config() -> &'static OllamaConfig {
+    unsafe {
+        CONFIG.get_or_insert_with(OllamaConfig::default)
+    }
 }
 
-unsafe fn get_client() -> &'static Client {
-    CLIENT.get_or_insert_with(|| {
-        Client::builder()
-            .timeout(get_config().timeout)
-            .build()
-            .expect("Failed to create HTTP client")
-    })
+fn get_client() -> &'static Client {
+    unsafe {
+        CLIENT.get_or_insert_with(|| {
+            Client::builder()
+                .timeout(get_config().timeout)
+                .build()
+                .expect("Failed to create HTTP client")
+        })
+    }
 }
 
-unsafe fn get_runtime() -> Arc<Mutex<Runtime>> {
-    RUNTIME.get_or_insert_with(|| {
-        Arc::new(Mutex::new(
-            Runtime::new().expect("Failed to create async runtime")
-        ))
-    }).clone()
+fn get_runtime() -> Arc<Mutex<Runtime>> {
+    unsafe {
+        RUNTIME.get_or_insert_with(|| {
+            Arc::new(Mutex::new(
+                Runtime::new().expect("Failed to create async runtime")
+            ))
+        }).clone()
+    }
 }
 
-unsafe fn get_callback_queue() -> Arc<Mutex<Vec<CallbackResult>>> {
-    CALLBACK_QUEUE.get_or_insert_with(|| {
-        Arc::new(Mutex::new(Vec::new()))
-    }).clone()
+fn get_callback_queue() -> Arc<Mutex<Vec<CallbackResult>>> {
+    unsafe {
+        CALLBACK_QUEUE.get_or_insert_with(|| {
+            Arc::new(Mutex::new(Vec::new()))
+        }).clone()
+    }
 }
 
-unsafe fn get_running_cache() -> Arc<Mutex<RunningCache>> {
-    RUNNING_CACHE.get_or_insert_with(|| {
-        Arc::new(Mutex::new(RunningCache {
-            is_running: false,
-            last_check: Instant::now() - CACHE_DURATION, // Force initial check
-            first_check_done: false,
-        }))
-    }).clone()
+fn get_running_cache() -> Arc<Mutex<RunningCache>> {
+    unsafe {
+        RUNNING_CACHE.get_or_insert_with(|| {
+            Arc::new(Mutex::new(RunningCache {
+                is_running: false,
+                last_check: Instant::now() - CACHE_DURATION, // Force initial check
+                first_check_done: false,
+            }))
+        }).clone()
+    }
 }
 
-unsafe fn update_running_status_async() {
+fn update_running_status_async() {
     let client = get_client().clone();
     let config = get_config();
     let url = format!("{}/api/tags", config.base_url);
@@ -264,727 +274,750 @@ unsafe fn update_running_status_async() {
 }
 
 #[lua_function]
-unsafe fn ollama_set_config(lua: gmod::lua::State) -> i32 {
-    let base_url = lua.check_string(1).to_string();
-    let timeout_secs = if lua.get_top() >= 2 && !lua.is_nil(2) {
-        lua.to_number(2) as u64
-    } else {
-        30
-    };
-
-    CONFIG = Some(OllamaConfig {
-        base_url,
-        timeout: Duration::from_secs(timeout_secs),
-    });
-
-    // Reset client to use new config
-    CLIENT = None;
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_generate(lua: gmod::lua::State) -> i32 {
-    let model = normalize_model_name(&lua.check_string(1));
-    let prompt = lua.check_string(2).to_string();
-
-    // Optional system prompt
-    let system = if lua.get_top() >= 3 && !lua.is_nil(3) {
-        Some(lua.check_string(3).to_string())
-    } else {
-        None
-    };
-
-        // Callback function is required
-    if lua.get_top() < 4 || !lua.is_function(4) {
-        lua.error("Callback function is required");
-    }
-
-    lua.push_value(4);
-    let callback_ref = lua.reference();
-
-    let request = GenerateRequest {
-        model: model.clone(),
-        prompt: prompt.clone(),
-        stream: Some(false),
-        system,
-        template: None,
-        context: None,
-        options: None,
-    };
-
-    let client = get_client().clone();
-    let config = get_config();
-    let url = format!("{}/api/generate", config.base_url);
-    let runtime = get_runtime();
-    let queue = get_callback_queue();
-
-    // Async execution with callback
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let result = rt.block_on(async {
-            client.post(&url)
-                .json(&request)
-                .send()
-                .await?
-                .json::<GenerateResponse>()
-                .await
-        });
-
-        // Queue the callback result
-        let callback_result = match result {
-            Ok(response) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Generate {
-                    response: response.response,
-                    model: response.model,
-                },
-            },
-            Err(e) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Error {
-                    message: format!("Error: {}", e),
-                },
-            },
-        };
-
-        queue.lock().unwrap().push(callback_result);
-    });
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_chat(lua: gmod::lua::State) -> i32 {
-    let model = normalize_model_name(&lua.check_string(1));
-
-    // Check if second argument is a table (messages)
-    if !lua.is_table(2) {
-        lua.error("Second argument must be a table of messages");
-    }
-
-    let mut messages = Vec::new();
-    let len = lua.len(2);
-    for i in 1..=len {
-        lua.raw_geti(2, i as i32); // Get the table entry at index i
-
-        if lua.is_table(-1) {
-            lua.get_field(-1, lua_string!("role"));
-            lua.get_field(-2, lua_string!("content"));
-
-            if let (Some(role), Some(content)) = (lua.get_string(-2), lua.get_string(-1)) {
-                messages.push(ChatMessage {
-                    role: role.to_string(),
-                    content: content.to_string(),
-                });
-            }
-
-            lua.pop_n(2); // Pop role and content
-        }
-
-        lua.pop(); // Pop table entry
-    }
-
-    // Callback function is required
-    if lua.get_top() < 3 || !lua.is_function(3) {
-        lua.error("Callback function is required");
-    }
-
-    lua.push_value(3);
-    let callback_ref = lua.reference();
-
-    let request = ChatRequest {
-        model: model.clone(),
-        messages,
-        stream: Some(false),
-        options: None,
-    };
-
-    let client = get_client().clone();
-    let config = get_config();
-    let url = format!("{}/api/chat", config.base_url);
-    let runtime = get_runtime();
-    let queue = get_callback_queue();
-
-    // Async execution with callback
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let result = rt.block_on(async {
-            client.post(&url)
-                .json(&request)
-                .send()
-                .await?
-                .json::<ChatResponse>()
-                .await
-        });
-
-        // Queue the callback result
-        let callback_result = match result {
-            Ok(response) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Chat {
-                    content: response.message.content,
-                    role: response.message.role,
-                    model: response.model,
-                },
-            },
-            Err(e) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Error {
-                    message: format!("Error: {}", e),
-                },
-            },
-        };
-
-        queue.lock().unwrap().push(callback_result);
-    });
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_list_models(lua: gmod::lua::State) -> i32 {
-        // Callback function is required
-    if lua.get_top() < 1 || !lua.is_function(1) {
-        lua.error("Callback function is required");
-    }
-
-    lua.push_value(1);
-    let callback_ref = lua.reference();
-
-    let client = get_client().clone();
-    let config = get_config();
-    let url = format!("{}/api/tags", config.base_url);
-    let runtime = get_runtime();
-    let queue = get_callback_queue();
-
-    // Async execution with callback
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let result = rt.block_on(async {
-            client.get(&url)
-                .send()
-                .await?
-                .json::<ModelsResponse>()
-                .await
-        });
-
-                // Queue the callback result
-        let callback_result = match result {
-            Ok(response) => CallbackResult {
-                callback_ref,
-                data: CallbackData::ListModels {
-                    models: response.models,
-                },
-            },
-            Err(e) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Error {
-                    message: format!("Error: {}", e),
-                },
-            },
-        };
-
-        queue.lock().unwrap().push(callback_result);
-    });
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_get_model_info(lua: gmod::lua::State) -> i32 {
-    let model_name = normalize_model_name(&lua.check_string(1));
-
-    // Callback function is required
-    if lua.get_top() < 2 || !lua.is_function(2) {
-        lua.error("Callback function is required");
-    }
-
-    lua.push_value(2);
-    let callback_ref = lua.reference();
-
-    let request = ShowRequest {
-        name: model_name.clone(),
-    };
-
-    let client = get_client().clone();
-    let config = get_config();
-    let url = format!("{}/api/show", config.base_url);
-    let runtime = get_runtime();
-    let queue = get_callback_queue();
-
-    // Async execution with callback
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let result = rt.block_on(async {
-            client.post(&url)
-                .json(&request)
-                .send()
-                .await?
-                .json::<ShowResponse>()
-                .await
-        });
-
-        // Queue the callback result
-        let callback_result = match result {
-            Ok(response) => CallbackResult {
-                callback_ref,
-                data: CallbackData::GetModelInfo {
-                    license: response.license.unwrap_or_else(|| "".to_string()),
-                    modelfile: response.modelfile.unwrap_or_else(|| "".to_string()),
-                    parameters: response.parameters.unwrap_or_else(|| "".to_string()),
-                    template: response.template.unwrap_or_else(|| "".to_string()),
-                },
-            },
-            Err(e) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Error {
-                    message: format!("Error: {}", e),
-                },
-            },
-        };
-
-        queue.lock().unwrap().push(callback_result);
-    });
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_is_model_available(lua: gmod::lua::State) -> i32 {
-    let model_name = normalize_model_name(&lua.check_string(1));
-
-    // Callback function is required
-    if lua.get_top() < 2 || !lua.is_function(2) {
-        lua.error("Callback function is required");
-    }
-
-    lua.push_value(2);
-    let callback_ref = lua.reference();
-
-    let client = get_client().clone();
-    let config = get_config();
-    let url = format!("{}/api/tags", config.base_url);
-    let runtime = get_runtime();
-    let queue = get_callback_queue();
-
-    // Async execution with callback
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let result = rt.block_on(async {
-            client.get(&url)
-                .send()
-                .await?
-                .json::<ModelsResponse>()
-                .await
-        });
-
-        // Queue the callback result
-        let callback_result = match result {
-            Ok(response) => {
-                let is_available = response.models.iter().any(|model| model.name == model_name);
-                CallbackResult {
-                    callback_ref,
-                    data: CallbackData::IsModelAvailable { is_available },
-                }
-            },
-            Err(e) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Error {
-                    message: format!("Error: {}", e),
-                },
-            },
-        };
-
-        queue.lock().unwrap().push(callback_result);
-    });
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_generate_embeddings(lua: gmod::lua::State) -> i32 {
-    let model = normalize_model_name(&lua.check_string(1));
-
-    // Second argument can be a string or table of strings
-    let input = if lua.is_table(2) {
-        // Handle array of strings
-        let mut inputs = Vec::new();
-        let mut i = 1;
-        loop {
-            lua.push_integer(i as isize);
-            lua.get_table(2);
-
-            if lua.is_nil(-1) {
-                lua.pop();
-                break;
-            }
-
-            if let Some(text) = lua.get_string(-1) {
-                inputs.push(text.to_string());
-            }
-
-            lua.pop();
-            i += 1;
-        }
-        serde_json::Value::Array(inputs.into_iter().map(serde_json::Value::String).collect())
-    } else {
-        // Handle single string
-        let text = lua.check_string(2).to_string();
-        serde_json::Value::String(text)
-    };
-
-    // Callback function is required
-    if lua.get_top() < 3 || !lua.is_function(3) {
-        lua.error("Callback function is required");
-    }
-
-    lua.push_value(3);
-    let callback_ref = lua.reference();
-
-    let request = EmbedRequest {
-        model: model.clone(),
-        input,
-        truncate: Some(true),
-        options: None,
-    };
-
-    let client = get_client().clone();
-    let config = get_config();
-    let url = format!("{}/api/embed", config.base_url);
-    let runtime = get_runtime();
-    let queue = get_callback_queue();
-
-    // Async execution with callback
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let result = rt.block_on(async {
-            client.post(&url)
-                .json(&request)
-                .send()
-                .await?
-                .json::<EmbedResponse>()
-                .await
-        });
-
-        // Queue the callback result
-        let callback_result = match result {
-            Ok(response) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Embeddings {
-                    model: response.model,
-                    embeddings: response.embeddings,
-                },
-            },
-            Err(e) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Error {
-                    message: format!("Error: {}", e),
-                },
-            },
-        };
-
-        queue.lock().unwrap().push(callback_result);
-    });
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_get_running_models(lua: gmod::lua::State) -> i32 {
-    // Callback function is required
-    if lua.get_top() < 1 || !lua.is_function(1) {
-        lua.error("Callback function is required");
-    }
-
-    lua.push_value(1);
-    let callback_ref = lua.reference();
-
-    let client = get_client().clone();
-    let config = get_config();
-    let url = format!("{}/api/ps", config.base_url);
-    let runtime = get_runtime();
-    let queue = get_callback_queue();
-
-    // Async execution with callback
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let result = rt.block_on(async {
-            client.get(&url)
-                .send()
-                .await?
-                .json::<RunningModelsResponse>()
-                .await
-        });
-
-        // Queue the callback result
-        let callback_result = match result {
-            Ok(response) => CallbackResult {
-                callback_ref,
-                data: CallbackData::GetRunningModels {
-                    models: response.models,
-                },
-            },
-            Err(e) => CallbackResult {
-                callback_ref,
-                data: CallbackData::Error {
-                    message: format!("Error: {}", e),
-                },
-            },
-        };
-
-        queue.lock().unwrap().push(callback_result);
-    });
-
-    0
-}
-
-#[lua_function]
-unsafe fn ollama_is_running(lua: gmod::lua::State) -> i32 {
-    let cache = get_running_cache();
-
-    let (is_running, needs_update, first_check) = {
-        if let Ok(cache_guard) = cache.lock() {
-            let needs_update = cache_guard.last_check.elapsed() >= CACHE_DURATION;
-            (cache_guard.is_running, needs_update, !cache_guard.first_check_done)
+fn ollama_set_config(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let base_url = lua.check_string(1).to_string();
+        let timeout_secs = if lua.get_top() >= 2 && !lua.is_nil(2) {
+            lua.to_number(2) as u64
         } else {
-            (false, true, true) // Default to false if we can't get the lock, and trigger update
-        }
-    };
+            30
+        };
 
-    // If this is the very first check, do it synchronously to get accurate result
-    if first_check {
+        CONFIG = Some(OllamaConfig {
+            base_url,
+            timeout: Duration::from_secs(timeout_secs),
+        });
+
+        // Reset client to use new config
+        CLIENT = None;
+
+        0
+    }
+}
+
+#[lua_function]
+fn ollama_generate(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let model = normalize_model_name(&lua.check_string(1));
+        let prompt = lua.check_string(2).to_string();
+
+        // Optional system prompt
+        let system = if lua.get_top() >= 3 && !lua.is_nil(3) {
+            Some(lua.check_string(3).to_string())
+        } else {
+            None
+        };
+
+            // Callback function is required
+        if lua.get_top() < 4 || !lua.is_function(4) {
+            lua.error("Callback function is required");
+        }
+
+        lua.push_value(4);
+        let callback_ref = lua.reference();
+
+        let request = GenerateRequest {
+            model: model.clone(),
+            prompt: prompt.clone(),
+            stream: Some(false),
+            system,
+            template: None,
+            context: None,
+            options: None,
+        };
+
+        let client = get_client().clone();
+        let config = get_config();
+        let url = format!("{}/api/generate", config.base_url);
+        let runtime = get_runtime();
+        let queue = get_callback_queue();
+
+        // Async execution with callback
+        std::thread::spawn(move || {
+            let rt = runtime.lock().unwrap();
+            let result = rt.block_on(async {
+                client.post(&url)
+                    .json(&request)
+                    .send()
+                    .await?
+                    .json::<GenerateResponse>()
+                    .await
+            });
+
+            // Queue the callback result
+            let callback_result = match result {
+                Ok(response) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Generate {
+                        response: response.response,
+                        model: response.model,
+                    },
+                },
+                Err(e) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Error {
+                        message: format!("Error: {}", e),
+                    },
+                },
+            };
+
+            queue.lock().unwrap().push(callback_result);
+        });
+
+        0
+    }
+}
+
+#[lua_function]
+fn ollama_chat(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let model = normalize_model_name(&lua.check_string(1));
+
+        // Check if second argument is a table (messages)
+        if !lua.is_table(2) {
+            lua.error("Second argument must be a table of messages");
+        }
+
+        let mut messages = Vec::new();
+        let len = lua.len(2);
+        for i in 1..=len {
+            lua.raw_geti(2, i as i32); // Get the table entry at index i
+
+            if lua.is_table(-1) {
+                lua.get_field(-1, lua_string!("role"));
+                lua.get_field(-2, lua_string!("content"));
+
+                if let (Some(role), Some(content)) = (lua.get_string(-2), lua.get_string(-1)) {
+                    messages.push(ChatMessage {
+                        role: role.to_string(),
+                        content: content.to_string(),
+                    });
+                }
+
+                lua.pop_n(2); // Pop role and content
+            }
+
+            lua.pop(); // Pop table entry
+        }
+
+        // Callback function is required
+        if lua.get_top() < 3 || !lua.is_function(3) {
+            lua.error("Callback function is required");
+        }
+
+        lua.push_value(3);
+        let callback_ref = lua.reference();
+
+        let request = ChatRequest {
+            model: model.clone(),
+            messages,
+            stream: Some(false),
+            options: None,
+        };
+
+        let client = get_client().clone();
+        let config = get_config();
+        let url = format!("{}/api/chat", config.base_url);
+        let runtime = get_runtime();
+        let queue = get_callback_queue();
+
+        // Async execution with callback
+        std::thread::spawn(move || {
+            let rt = runtime.lock().unwrap();
+            let result = rt.block_on(async {
+                client.post(&url)
+                    .json(&request)
+                    .send()
+                    .await?
+                    .json::<ChatResponse>()
+                    .await
+            });
+
+            // Queue the callback result
+            let callback_result = match result {
+                Ok(response) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Chat {
+                        content: response.message.content,
+                        role: response.message.role,
+                        model: response.model,
+                    },
+                },
+                Err(e) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Error {
+                        message: format!("Error: {}", e),
+                    },
+                },
+            };
+
+            queue.lock().unwrap().push(callback_result);
+        });
+
+        0
+    }
+}
+
+#[lua_function]
+fn ollama_list_models(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        // Callback function is required
+        if lua.get_top() < 1 || !lua.is_function(1) {
+            lua.error("Callback function is required");
+        }
+
+        lua.push_value(1);
+        let callback_ref = lua.reference();
+
         let client = get_client().clone();
         let config = get_config();
         let url = format!("{}/api/tags", config.base_url);
         let runtime = get_runtime();
+        let queue = get_callback_queue();
 
-        let rt = runtime.lock().unwrap();
-        let actual_status = rt.block_on(async {
-            match client.get(&url).send().await {
-                Ok(response) => response.status().is_success(),
-                Err(_) => false,
-            }
+        // Async execution with callback
+        std::thread::spawn(move || {
+            let rt = runtime.lock().unwrap();
+            let result = rt.block_on(async {
+                client.get(&url)
+                    .send()
+                    .await?
+                    .json::<ModelsResponse>()
+                    .await
+            });
+
+                    // Queue the callback result
+            let callback_result = match result {
+                Ok(response) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::ListModels {
+                        models: response.models,
+                    },
+                },
+                Err(e) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Error {
+                        message: format!("Error: {}", e),
+                    },
+                },
+            };
+
+            queue.lock().unwrap().push(callback_result);
         });
 
-        // Update cache with first check result
-        if let Ok(mut cache_guard) = cache.lock() {
-            cache_guard.is_running = actual_status;
-            cache_guard.last_check = Instant::now();
-            cache_guard.first_check_done = true;
-        }
-
-        lua.push_boolean(actual_status);
-        return 1;
+        0
     }
-
-    // If cache is stale, trigger async update
-    if needs_update {
-        update_running_status_async();
-    }
-
-    lua.push_boolean(is_running);
-    1
 }
 
 #[lua_function]
-unsafe fn process_callbacks(lua: gmod::lua::State) -> i32 {
-    let queue = get_callback_queue();
-    let mut callbacks = queue.lock().unwrap();
+fn ollama_get_model_info(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let model_name = normalize_model_name(&lua.check_string(1));
 
-    for callback_result in callbacks.drain(..) {
-        // Push error handler function that calls ErrorNoHaltWithStack
-        lua.get_global(lua_string!("ErrorNoHaltWithStack"));
-        let error_handler_index = lua.get_top();
-
-        lua.from_reference(callback_result.callback_ref);
-
-        match callback_result.data {
-            CallbackData::Generate { response, model } => {
-                lua.push_nil(); // No error
-                lua.new_table();
-                lua.push_string(&response);
-                lua.set_field(-2, lua_string!("response"));
-                lua.push_string(&model);
-                lua.set_field(-2, lua_string!("model"));
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
-            CallbackData::Chat { content, role, model } => {
-                lua.push_nil(); // No error
-                lua.new_table();
-                lua.push_string(&content);
-                lua.set_field(-2, lua_string!("content"));
-                lua.push_string(&role);
-                lua.set_field(-2, lua_string!("role"));
-                lua.push_string(&model);
-                lua.set_field(-2, lua_string!("model"));
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
-            CallbackData::ListModels { models } => {
-                lua.push_nil(); // No error
-                lua.new_table();
-                for (i, model) in models.iter().enumerate() {
-                    lua.push_integer((i + 1) as isize);
-                    lua.new_table();
-
-                    lua.push_string(&model.name);
-                    lua.set_field(-2, lua_string!("name"));
-
-                    lua.push_string(&model.modified_at);
-                    lua.set_field(-2, lua_string!("modified_at"));
-
-                    lua.push_number(model.size as f64);
-                    lua.set_field(-2, lua_string!("size"));
-
-                    lua.push_string(&model.digest);
-                    lua.set_field(-2, lua_string!("digest"));
-
-                    lua.set_table(-3);
-                }
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
-            CallbackData::GetModelInfo { license, modelfile, parameters, template } => {
-                lua.push_nil(); // No error
-                lua.new_table();
-                lua.push_string(&license);
-                lua.set_field(-2, lua_string!("license"));
-                lua.push_string(&modelfile);
-                lua.set_field(-2, lua_string!("modelfile"));
-                lua.push_string(&parameters);
-                lua.set_field(-2, lua_string!("parameters"));
-                lua.push_string(&template);
-                lua.set_field(-2, lua_string!("template"));
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
-            CallbackData::IsModelAvailable { is_available } => {
-                lua.push_nil(); // No error
-                lua.push_boolean(is_available);
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
-            CallbackData::Embeddings { model, embeddings } => {
-                lua.push_nil(); // No error
-                lua.new_table();
-                lua.push_string(&model);
-                lua.set_field(-2, lua_string!("model"));
-
-                // Create embeddings array
-                lua.new_table();
-                for (i, embedding) in embeddings.iter().enumerate() {
-                    lua.push_integer((i + 1) as isize);
-                    lua.new_table();
-                    for (j, value) in embedding.iter().enumerate() {
-                        lua.push_integer((j + 1) as isize);
-                        lua.push_number(*value);
-                        lua.set_table(-3);
-                    }
-                    lua.set_table(-3);
-                }
-                lua.set_field(-2, lua_string!("embeddings"));
-
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
-            CallbackData::GetRunningModels { models } => {
-                lua.push_nil(); // No error
-                lua.new_table();
-                for (i, model) in models.iter().enumerate() {
-                    lua.push_integer((i + 1) as isize);
-                    lua.new_table();
-
-                    lua.push_string(&model.name);
-                    lua.set_field(-2, lua_string!("name"));
-
-                    lua.push_string(&model.model);
-                    lua.set_field(-2, lua_string!("model"));
-
-                    lua.push_number(model.size as f64);
-                    lua.set_field(-2, lua_string!("size"));
-
-                    lua.push_string(&model.digest);
-                    lua.set_field(-2, lua_string!("digest"));
-
-                    if let Some(expires_at) = &model.expires_at {
-                        lua.push_string(expires_at);
-                        lua.set_field(-2, lua_string!("expires_at"));
-                    }
-
-                    if let Some(size_vram) = model.size_vram {
-                        lua.push_number(size_vram as f64);
-                        lua.set_field(-2, lua_string!("size_vram"));
-                    }
-
-                    lua.set_table(-3);
-                }
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
-            CallbackData::Error { message } => {
-                lua.push_string(&message); // Error message
-                lua.push_nil();
-                let _ = lua.pcall(2, 0, error_handler_index);
-            },
+        // Callback function is required
+        if lua.get_top() < 2 || !lua.is_function(2) {
+            lua.error("Callback function is required");
         }
 
-        // Clean up error handler from stack
-        lua.pop();
+        lua.push_value(2);
+        let callback_ref = lua.reference();
 
-        lua.dereference(callback_result.callback_ref);
+        let request = ShowRequest {
+            name: model_name.clone(),
+        };
+
+        let client = get_client().clone();
+        let config = get_config();
+        let url = format!("{}/api/show", config.base_url);
+        let runtime = get_runtime();
+        let queue = get_callback_queue();
+
+        // Async execution with callback
+        std::thread::spawn(move || {
+            let rt = runtime.lock().unwrap();
+            let result = rt.block_on(async {
+                client.post(&url)
+                    .json(&request)
+                    .send()
+                    .await?
+                    .json::<ShowResponse>()
+                    .await
+            });
+
+            // Queue the callback result
+            let callback_result = match result {
+                Ok(response) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::GetModelInfo {
+                        license: response.license.unwrap_or_else(|| "".to_string()),
+                        modelfile: response.modelfile.unwrap_or_else(|| "".to_string()),
+                        parameters: response.parameters.unwrap_or_else(|| "".to_string()),
+                        template: response.template.unwrap_or_else(|| "".to_string()),
+                    },
+                },
+                Err(e) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Error {
+                        message: format!("Error: {}", e),
+                    },
+                },
+            };
+
+            queue.lock().unwrap().push(callback_result);
+        });
+
+        0
     }
-
-    0
 }
 
-unsafe fn initialize_callback_processor(lua: gmod::lua::State) {
-    lua.get_global(lua_string!("hook"));
-        lua.get_field(-1, lua_string!("Add"));
-            lua.push_string("Think");
-            lua.push_string("__OllamaCallbacks");
-            lua.push_function(process_callbacks);
-        lua.call(3, 0);
-    lua.pop_n(2);
+#[lua_function]
+fn ollama_is_model_available(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let model_name = normalize_model_name(&lua.check_string(1));
+
+        // Callback function is required
+        if lua.get_top() < 2 || !lua.is_function(2) {
+            lua.error("Callback function is required");
+        }
+
+        lua.push_value(2);
+        let callback_ref = lua.reference();
+
+        let client = get_client().clone();
+        let config = get_config();
+        let url = format!("{}/api/tags", config.base_url);
+        let runtime = get_runtime();
+        let queue = get_callback_queue();
+
+        // Async execution with callback
+        std::thread::spawn(move || {
+            let rt = runtime.lock().unwrap();
+            let result = rt.block_on(async {
+                client.get(&url)
+                    .send()
+                    .await?
+                    .json::<ModelsResponse>()
+                    .await
+            });
+
+            // Queue the callback result
+            let callback_result = match result {
+                Ok(response) => {
+                    let is_available = response.models.iter().any(|model| model.name == model_name);
+                    CallbackResult {
+                        callback_ref,
+                        data: CallbackData::IsModelAvailable { is_available },
+                    }
+                },
+                Err(e) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Error {
+                        message: format!("Error: {}", e),
+                    },
+                },
+            };
+
+            queue.lock().unwrap().push(callback_result);
+        });
+
+        0
+    }
+}
+
+#[lua_function]
+fn ollama_generate_embeddings(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let model = normalize_model_name(&lua.check_string(1));
+
+        // Second argument can be a string or table of strings
+        let input = if lua.is_table(2) {
+            // Handle array of strings
+            let mut inputs = Vec::new();
+            let mut i = 1;
+            loop {
+                lua.push_integer(i as isize);
+                lua.get_table(2);
+
+                if lua.is_nil(-1) {
+                    lua.pop();
+                    break;
+                }
+
+                if let Some(text) = lua.get_string(-1) {
+                    inputs.push(text.to_string());
+                }
+
+                lua.pop();
+                i += 1;
+            }
+            serde_json::Value::Array(inputs.into_iter().map(serde_json::Value::String).collect())
+        } else {
+            // Handle single string
+            let text = lua.check_string(2).to_string();
+            serde_json::Value::String(text)
+        };
+
+        // Callback function is required
+        if lua.get_top() < 3 || !lua.is_function(3) {
+            lua.error("Callback function is required");
+        }
+
+        lua.push_value(3);
+        let callback_ref = lua.reference();
+
+        let request = EmbedRequest {
+            model: model.clone(),
+            input,
+            truncate: Some(true),
+            options: None,
+        };
+
+        let client = get_client().clone();
+        let config = get_config();
+        let url = format!("{}/api/embed", config.base_url);
+        let runtime = get_runtime();
+        let queue = get_callback_queue();
+
+        // Async execution with callback
+        std::thread::spawn(move || {
+            let rt = runtime.lock().unwrap();
+            let result = rt.block_on(async {
+                client.post(&url)
+                    .json(&request)
+                    .send()
+                    .await?
+                    .json::<EmbedResponse>()
+                    .await
+            });
+
+            // Queue the callback result
+            let callback_result = match result {
+                Ok(response) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Embeddings {
+                        model: response.model,
+                        embeddings: response.embeddings,
+                    },
+                },
+                Err(e) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Error {
+                        message: format!("Error: {}", e),
+                    },
+                },
+            };
+
+            queue.lock().unwrap().push(callback_result);
+        });
+
+        0
+    }
+}
+
+#[lua_function]
+fn ollama_get_running_models(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        // Callback function is required
+        if lua.get_top() < 1 || !lua.is_function(1) {
+            lua.error("Callback function is required");
+        }
+
+        lua.push_value(1);
+        let callback_ref = lua.reference();
+
+        let client = get_client().clone();
+        let config = get_config();
+        let url = format!("{}/api/ps", config.base_url);
+        let runtime = get_runtime();
+        let queue = get_callback_queue();
+
+        // Async execution with callback
+        std::thread::spawn(move || {
+            let rt = runtime.lock().unwrap();
+            let result = rt.block_on(async {
+                client.get(&url)
+                    .send()
+                    .await?
+                    .json::<RunningModelsResponse>()
+                    .await
+            });
+
+            // Queue the callback result
+            let callback_result = match result {
+                Ok(response) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::GetRunningModels {
+                        models: response.models,
+                    },
+                },
+                Err(e) => CallbackResult {
+                    callback_ref,
+                    data: CallbackData::Error {
+                        message: format!("Error: {}", e),
+                    },
+                },
+            };
+
+            queue.lock().unwrap().push(callback_result);
+        });
+
+        0
+    }
+}
+
+#[lua_function]
+fn ollama_is_running(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let cache = get_running_cache();
+
+        let (is_running, needs_update, first_check) = {
+            if let Ok(cache_guard) = cache.lock() {
+                let needs_update = cache_guard.last_check.elapsed() >= CACHE_DURATION;
+                (cache_guard.is_running, needs_update, !cache_guard.first_check_done)
+            } else {
+                (false, true, true) // Default to false if we can't get the lock, and trigger update
+            }
+        };
+
+        // If this is the very first check, do it synchronously to get accurate result
+        if first_check {
+            let client = get_client().clone();
+            let config = get_config();
+            let url = format!("{}/api/tags", config.base_url);
+            let runtime = get_runtime();
+
+            let rt = runtime.lock().unwrap();
+            let actual_status = rt.block_on(async {
+                match client.get(&url).send().await {
+                    Ok(response) => response.status().is_success(),
+                    Err(_) => false,
+                }
+            });
+
+            // Update cache with first check result
+            if let Ok(mut cache_guard) = cache.lock() {
+                cache_guard.is_running = actual_status;
+                cache_guard.last_check = Instant::now();
+                cache_guard.first_check_done = true;
+            }
+
+            lua.push_boolean(actual_status);
+            return 1;
+        }
+
+        // If cache is stale, trigger async update
+        if needs_update {
+            update_running_status_async();
+        }
+
+        lua.push_boolean(is_running);
+        1
+    }
+}
+
+#[lua_function]
+fn process_callbacks(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        let queue = get_callback_queue();
+        let mut callbacks = queue.lock().unwrap();
+
+        for callback_result in callbacks.drain(..) {
+            // Push error handler function that calls ErrorNoHaltWithStack
+            lua.get_global(lua_string!("ErrorNoHaltWithStack"));
+            let error_handler_index = lua.get_top();
+
+            lua.from_reference(callback_result.callback_ref);
+
+            match callback_result.data {
+                CallbackData::Generate { response, model } => {
+                    lua.push_nil(); // No error
+                    lua.new_table();
+                    lua.push_string(&response);
+                    lua.set_field(-2, lua_string!("response"));
+                    lua.push_string(&model);
+                    lua.set_field(-2, lua_string!("model"));
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+                CallbackData::Chat { content, role, model } => {
+                    lua.push_nil(); // No error
+                    lua.new_table();
+                    lua.push_string(&content);
+                    lua.set_field(-2, lua_string!("content"));
+                    lua.push_string(&role);
+                    lua.set_field(-2, lua_string!("role"));
+                    lua.push_string(&model);
+                    lua.set_field(-2, lua_string!("model"));
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+                CallbackData::ListModels { models } => {
+                    lua.push_nil(); // No error
+                    lua.new_table();
+                    for (i, model) in models.iter().enumerate() {
+                        lua.push_integer((i + 1) as isize);
+                        lua.new_table();
+
+                        lua.push_string(&model.name);
+                        lua.set_field(-2, lua_string!("name"));
+
+                        lua.push_string(&model.modified_at);
+                        lua.set_field(-2, lua_string!("modified_at"));
+
+                        lua.push_number(model.size as f64);
+                        lua.set_field(-2, lua_string!("size"));
+
+                        lua.push_string(&model.digest);
+                        lua.set_field(-2, lua_string!("digest"));
+
+                        lua.set_table(-3);
+                    }
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+                CallbackData::GetModelInfo { license, modelfile, parameters, template } => {
+                    lua.push_nil(); // No error
+                    lua.new_table();
+                    lua.push_string(&license);
+                    lua.set_field(-2, lua_string!("license"));
+                    lua.push_string(&modelfile);
+                    lua.set_field(-2, lua_string!("modelfile"));
+                    lua.push_string(&parameters);
+                    lua.set_field(-2, lua_string!("parameters"));
+                    lua.push_string(&template);
+                    lua.set_field(-2, lua_string!("template"));
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+                CallbackData::IsModelAvailable { is_available } => {
+                    lua.push_nil(); // No error
+                    lua.push_boolean(is_available);
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+                CallbackData::Embeddings { model, embeddings } => {
+                    lua.push_nil(); // No error
+                    lua.new_table();
+                    lua.push_string(&model);
+                    lua.set_field(-2, lua_string!("model"));
+
+                    // Create embeddings array
+                    lua.new_table();
+                    for (i, embedding) in embeddings.iter().enumerate() {
+                        lua.push_integer((i + 1) as isize);
+                        lua.new_table();
+                        for (j, value) in embedding.iter().enumerate() {
+                            lua.push_integer((j + 1) as isize);
+                            lua.push_number(*value);
+                            lua.set_table(-3);
+                        }
+                        lua.set_table(-3);
+                    }
+                    lua.set_field(-2, lua_string!("embeddings"));
+
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+                CallbackData::GetRunningModels { models } => {
+                    lua.push_nil(); // No error
+                    lua.new_table();
+                    for (i, model) in models.iter().enumerate() {
+                        lua.push_integer((i + 1) as isize);
+                        lua.new_table();
+
+                        lua.push_string(&model.name);
+                        lua.set_field(-2, lua_string!("name"));
+
+                        lua.push_string(&model.model);
+                        lua.set_field(-2, lua_string!("model"));
+
+                        lua.push_number(model.size as f64);
+                        lua.set_field(-2, lua_string!("size"));
+
+                        lua.push_string(&model.digest);
+                        lua.set_field(-2, lua_string!("digest"));
+
+                        if let Some(expires_at) = &model.expires_at {
+                            lua.push_string(expires_at);
+                            lua.set_field(-2, lua_string!("expires_at"));
+                        }
+
+                        if let Some(size_vram) = model.size_vram {
+                            lua.push_number(size_vram as f64);
+                            lua.set_field(-2, lua_string!("size_vram"));
+                        }
+
+                        lua.set_table(-3);
+                    }
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+                CallbackData::Error { message } => {
+                    lua.push_string(&message); // Error message
+                    lua.push_nil();
+                    let _ = lua.pcall(2, 0, error_handler_index);
+                },
+            }
+
+            // Clean up error handler from stack
+            lua.pop();
+
+            lua.dereference(callback_result.callback_ref);
+        }
+
+        0
+    }
+}
+
+fn initialize_callback_processor(lua: gmod::lua::State) {
+    unsafe {
+        lua.get_global(lua_string!("hook"));
+            lua.get_field(-1, lua_string!("Add"));
+                lua.push_string("Think");
+                lua.push_string("__OllamaCallbacks");
+                lua.push_function(process_callbacks);
+            lua.call(3, 0);
+        lua.pop_n(2);
+    }
 }
 
 #[gmod13_open]
-unsafe fn gmod13_open(lua: gmod::lua::State) -> i32 {
-    initialize_callback_processor(lua);
+fn gmod13_open(lua: gmod::lua::State) -> i32 {
+    unsafe {
+        initialize_callback_processor(lua);
 
-    // Create Ollama table
-    lua.new_table();
+        // Create Ollama table
+        lua.new_table();
 
-    // Add functions to the Ollama table
-    lua.push_function(ollama_set_config);
-    lua.set_field(-2, lua_string!("SetConfig"));
+        // Add functions to the Ollama table
+        lua.push_function(ollama_set_config);
+        lua.set_field(-2, lua_string!("SetConfig"));
 
-    lua.push_function(ollama_generate);
-    lua.set_field(-2, lua_string!("Generate"));
+        lua.push_function(ollama_generate);
+        lua.set_field(-2, lua_string!("Generate"));
 
-    lua.push_function(ollama_chat);
-    lua.set_field(-2, lua_string!("Chat"));
+        lua.push_function(ollama_chat);
+        lua.set_field(-2, lua_string!("Chat"));
 
-    lua.push_function(ollama_list_models);
-    lua.set_field(-2, lua_string!("ListModels"));
+        lua.push_function(ollama_list_models);
+        lua.set_field(-2, lua_string!("ListModels"));
 
-    lua.push_function(ollama_is_running);
-    lua.set_field(-2, lua_string!("IsRunning"));
+        lua.push_function(ollama_is_running);
+        lua.set_field(-2, lua_string!("IsRunning"));
 
-    lua.push_function(ollama_get_model_info);
-    lua.set_field(-2, lua_string!("GetModelInfo"));
+        lua.push_function(ollama_get_model_info);
+        lua.set_field(-2, lua_string!("GetModelInfo"));
 
-    lua.push_function(ollama_is_model_available);
-    lua.set_field(-2, lua_string!("IsModelAvailable"));
+        lua.push_function(ollama_is_model_available);
+        lua.set_field(-2, lua_string!("IsModelAvailable"));
 
-    lua.push_function(ollama_generate_embeddings);
-    lua.set_field(-2, lua_string!("GenerateEmbeddings"));
+        lua.push_function(ollama_generate_embeddings);
+        lua.set_field(-2, lua_string!("GenerateEmbeddings"));
 
-    lua.push_function(ollama_get_running_models);
-    lua.set_field(-2, lua_string!("GetRunningModels"));
+        lua.push_function(ollama_get_running_models);
+        lua.set_field(-2, lua_string!("GetRunningModels"));
 
-    // Set the global Ollama table
-    lua.set_global(lua_string!("Ollama"));
+        // Set the global Ollama table
+        lua.set_global(lua_string!("Ollama"));
 
-    0
+        0
+    }
 }
 
 #[gmod13_close]
-unsafe fn gmod13_close(_: gmod::lua::State) -> i32 {
+fn gmod13_close(_: gmod::lua::State) -> i32 {
     0
 }
-
