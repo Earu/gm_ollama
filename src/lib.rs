@@ -203,13 +203,15 @@ fn normalize_model_name(model_name: &str) -> String {
 
 fn get_config() -> &'static OllamaConfig {
     unsafe {
-        CONFIG.get_or_insert_with(OllamaConfig::default)
+        let ptr = std::ptr::addr_of_mut!(CONFIG);
+        (*ptr).get_or_insert_with(OllamaConfig::default)
     }
 }
 
 fn get_client() -> &'static Client {
     unsafe {
-        CLIENT.get_or_insert_with(|| {
+        let ptr = std::ptr::addr_of_mut!(CLIENT);
+        (*ptr).get_or_insert_with(|| {
             Client::builder()
                 .timeout(get_config().timeout)
                 .build()
@@ -220,7 +222,8 @@ fn get_client() -> &'static Client {
 
 fn get_runtime() -> Arc<Mutex<Runtime>> {
     unsafe {
-        RUNTIME.get_or_insert_with(|| {
+        let ptr = std::ptr::addr_of_mut!(RUNTIME);
+        (*ptr).get_or_insert_with(|| {
             Arc::new(Mutex::new(
                 Runtime::new().expect("Failed to create async runtime")
             ))
@@ -230,7 +233,8 @@ fn get_runtime() -> Arc<Mutex<Runtime>> {
 
 fn get_callback_queue() -> Arc<Mutex<Vec<CallbackResult>>> {
     unsafe {
-        CALLBACK_QUEUE.get_or_insert_with(|| {
+        let ptr = std::ptr::addr_of_mut!(CALLBACK_QUEUE);
+        (*ptr).get_or_insert_with(|| {
             Arc::new(Mutex::new(Vec::new()))
         }).clone()
     }
@@ -238,7 +242,8 @@ fn get_callback_queue() -> Arc<Mutex<Vec<CallbackResult>>> {
 
 fn get_running_cache() -> Arc<Mutex<RunningCache>> {
     unsafe {
-        RUNNING_CACHE.get_or_insert_with(|| {
+        let ptr = std::ptr::addr_of_mut!(RUNNING_CACHE);
+        (*ptr).get_or_insert_with(|| {
             Arc::new(Mutex::new(RunningCache {
                 is_running: false,
                 last_check: Instant::now() - CACHE_DURATION, // Force initial check
