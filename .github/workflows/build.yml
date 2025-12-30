@@ -172,33 +172,3 @@ jobs:
           gm_ollama_all_platforms.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Additional job for development builds
-  development:
-    name: Development Build
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-
-    steps:
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-
-    - name: Prepare development release
-      run: |
-        mkdir -p dev-release
-
-        # Combine all artifacts
-        find . -name "*.dll" -exec cp {} dev-release/ \;
-
-        # Create zip
-        cd dev-release
-        zip -r ../gm_ollama_dev_$(date +%Y%m%d_%H%M%S).zip .
-        cd ..
-
-    - name: Upload development build
-      uses: actions/upload-artifact@v4
-      with:
-        name: gm_ollama_development
-        path: gm_ollama_dev_*.zip
-        retention-days: 7
