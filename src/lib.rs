@@ -111,25 +111,6 @@ struct ModelsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct PullRequest {
-    name: String,
-    stream: Option<bool>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct PullResponse {
-    status: String,
-    digest: Option<String>,
-    total: Option<u64>,
-    completed: Option<u64>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct DeleteRequest {
-    name: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 struct ShowRequest {
     name: String,
 }
