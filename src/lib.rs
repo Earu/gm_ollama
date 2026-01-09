@@ -960,6 +960,28 @@ fn initialize_callback_processor(lua: gmod::lua::State) {
     }
 }
 
+fn finish_callback_processor(lua: gmod::lua::State) {
+    unsafe {
+        lua.get_global(lua_string!("hook"));
+            lua.get_field(-1, lua_string!("Remove"));
+                lua.push_string("Think");
+                lua.push_string("__OllamaCallbacks");
+            lua.call(2, 0);
+        lua.pop_n(2);
+
+        // Clear callback queue and dereference all Lua callbacks
+        let ptr = std::ptr::addr_of_mut!(CALLBACK_QUEUE);
+        if let Some(queue) = (*ptr).as_ref() {
+            if let Ok(mut callbacks) = queue.lock() {
+                for callback_result in callbacks.drain(..) {
+                    lua.dereference(callback_result.callback_ref);
+                }
+            }
+        }
+
+    }
+}
+
 #[gmod13_open]
 fn gmod13_open(lua: gmod::lua::State) -> i32 {
     unsafe {
@@ -1004,6 +1026,38 @@ fn gmod13_open(lua: gmod::lua::State) -> i32 {
 }
 
 #[gmod13_close]
-fn gmod13_close(_: gmod::lua::State) -> i32 {
-    0
+fn gmod13_close(lua: gmod::lua::State) -> i32 {
+    finish_callback_processor(lua);
+
+    unsafe {
+        // Shutdown the Tokio runtime
+        let runtime_ptr = std::ptr::addr_of_mut!(RUNTIME);
+        if let Some(runtime_arc) = (*runtime_ptr).take() {
+            // Drop all spawned thread references first by waiting a bit
+            std::thread::sleep(Duration::from_millis(100));
+
+            // This will only work if all other Arc references are dropped
+            match Arc::try_unwrap(runtime_arc) {
+                Ok(runtime_mutex) => {
+                    // Get the Runtime from Mutex
+                    if let Ok(runtime) = runtime_mutex.into_inner() {
+                        // Shutdown the runtime gracefully
+                        runtime.shutdown_timeout(Duration::from_secs(2));
+                    }
+                }
+                Err(arc) => {
+                    // Still have other references, force shutdown by dropping
+                    // The runtime will be dropped when the last Arc reference is dropped
+                    drop(arc);
+                }
+            }
+        }
+
+        *std::ptr::addr_of_mut!(CLIENT) = None;
+        *std::ptr::addr_of_mut!(CALLBACK_QUEUE) = None;
+        *std::ptr::addr_of_mut!(RUNNING_CACHE) = None;
+        *std::ptr::addr_of_mut!(CONFIG) = None;
+
+        0
+    }
 }
