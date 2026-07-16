@@ -10,7 +10,7 @@ extern crate gmod;
 
 // Global HTTP client and async runtime
 static mut CLIENT: Option<Client> = None;
-static mut RUNTIME: Option<Arc<Mutex<Runtime>>> = None;
+static mut RUNTIME: Option<Runtime> = None;
 
 // Cache for IsRunning function
 struct RunningCache {
@@ -201,14 +201,12 @@ fn get_client() -> &'static Client {
     }
 }
 
-fn get_runtime() -> Arc<Mutex<Runtime>> {
+fn get_runtime() -> &'static Runtime {
     unsafe {
         let ptr = std::ptr::addr_of_mut!(RUNTIME);
         (*ptr).get_or_insert_with(|| {
-            Arc::new(Mutex::new(
-                Runtime::new().expect("Failed to create async runtime")
-            ))
-        }).clone()
+            Runtime::new().expect("Failed to create async runtime")
+        })
     }
 }
 
@@ -241,14 +239,11 @@ fn update_running_status_async() {
     let runtime = get_runtime();
     let cache = get_running_cache();
 
-    std::thread::spawn(move || {
-        let rt = runtime.lock().unwrap();
-        let is_running = rt.block_on(async {
-            match client.get(&url).send().await {
-                Ok(response) => response.status().is_success(),
-                Err(_) => false,
-            }
-        });
+    runtime.spawn(async move {
+        let is_running = match client.get(&url).send().await {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        };
 
         // Update cache
         if let Ok(mut cache_guard) = cache.lock() {
@@ -319,16 +314,15 @@ fn ollama_generate(lua: gmod::lua::State) -> i32 {
         let queue = get_callback_queue();
 
         // Async execution with callback
-        std::thread::spawn(move || {
-            let rt = runtime.lock().unwrap();
-            let result = rt.block_on(async {
+        runtime.spawn(async move {
+            let result = async {
                 client.post(&url)
                     .json(&request)
                     .send()
                     .await?
                     .json::<GenerateResponse>()
                     .await
-            });
+            }.await;
 
             // Queue the callback result
             let callback_result = match result {
@@ -408,16 +402,15 @@ fn ollama_chat(lua: gmod::lua::State) -> i32 {
         let queue = get_callback_queue();
 
         // Async execution with callback
-        std::thread::spawn(move || {
-            let rt = runtime.lock().unwrap();
-            let result = rt.block_on(async {
+        runtime.spawn(async move {
+            let result = async {
                 client.post(&url)
                     .json(&request)
                     .send()
                     .await?
                     .json::<ChatResponse>()
                     .await
-            });
+            }.await;
 
             // Queue the callback result
             let callback_result = match result {
@@ -462,15 +455,14 @@ fn ollama_list_models(lua: gmod::lua::State) -> i32 {
         let queue = get_callback_queue();
 
         // Async execution with callback
-        std::thread::spawn(move || {
-            let rt = runtime.lock().unwrap();
-            let result = rt.block_on(async {
+        runtime.spawn(async move {
+            let result = async {
                 client.get(&url)
                     .send()
                     .await?
                     .json::<ModelsResponse>()
                     .await
-            });
+            }.await;
 
                     // Queue the callback result
             let callback_result = match result {
@@ -519,16 +511,15 @@ fn ollama_get_model_info(lua: gmod::lua::State) -> i32 {
         let queue = get_callback_queue();
 
         // Async execution with callback
-        std::thread::spawn(move || {
-            let rt = runtime.lock().unwrap();
-            let result = rt.block_on(async {
+        runtime.spawn(async move {
+            let result = async {
                 client.post(&url)
                     .json(&request)
                     .send()
                     .await?
                     .json::<ShowResponse>()
                     .await
-            });
+            }.await;
 
             // Queue the callback result
             let callback_result = match result {
@@ -576,15 +567,14 @@ fn ollama_is_model_available(lua: gmod::lua::State) -> i32 {
         let queue = get_callback_queue();
 
         // Async execution with callback
-        std::thread::spawn(move || {
-            let rt = runtime.lock().unwrap();
-            let result = rt.block_on(async {
+        runtime.spawn(async move {
+            let result = async {
                 client.get(&url)
                     .send()
                     .await?
                     .json::<ModelsResponse>()
                     .await
-            });
+            }.await;
 
             // Queue the callback result
             let callback_result = match result {
@@ -665,16 +655,15 @@ fn ollama_generate_embeddings(lua: gmod::lua::State) -> i32 {
         let queue = get_callback_queue();
 
         // Async execution with callback
-        std::thread::spawn(move || {
-            let rt = runtime.lock().unwrap();
-            let result = rt.block_on(async {
+        runtime.spawn(async move {
+            let result = async {
                 client.post(&url)
                     .json(&request)
                     .send()
                     .await?
                     .json::<EmbedResponse>()
                     .await
-            });
+            }.await;
 
             // Queue the callback result
             let callback_result = match result {
@@ -718,15 +707,14 @@ fn ollama_get_running_models(lua: gmod::lua::State) -> i32 {
         let queue = get_callback_queue();
 
         // Async execution with callback
-        std::thread::spawn(move || {
-            let rt = runtime.lock().unwrap();
-            let result = rt.block_on(async {
+        runtime.spawn(async move {
+            let result = async {
                 client.get(&url)
                     .send()
                     .await?
                     .json::<RunningModelsResponse>()
                     .await
-            });
+            }.await;
 
             // Queue the callback result
             let callback_result = match result {
@@ -772,8 +760,7 @@ fn ollama_is_running(lua: gmod::lua::State) -> i32 {
             let url = format!("{}/api/tags", config.base_url);
             let runtime = get_runtime();
 
-            let rt = runtime.lock().unwrap();
-            let actual_status = rt.block_on(async {
+            let actual_status = runtime.block_on(async {
                 match client.get(&url).send().await {
                     Ok(response) => response.status().is_success(),
                     Err(_) => false,
@@ -1030,27 +1017,11 @@ fn gmod13_close(lua: gmod::lua::State) -> i32 {
     finish_callback_processor(lua);
 
     unsafe {
-        // Shutdown the Tokio runtime
-        let runtime_ptr = std::ptr::addr_of_mut!(RUNTIME);
-        if let Some(runtime_arc) = (*runtime_ptr).take() {
-            // Drop all spawned thread references first by waiting a bit
-            std::thread::sleep(Duration::from_millis(100));
-
-            // This will only work if all other Arc references are dropped
-            match Arc::try_unwrap(runtime_arc) {
-                Ok(runtime_mutex) => {
-                    // Get the Runtime from Mutex
-                    if let Ok(runtime) = runtime_mutex.into_inner() {
-                        // Shutdown the runtime gracefully
-                        runtime.shutdown_timeout(Duration::from_secs(2));
-                    }
-                }
-                Err(arc) => {
-                    // Still have other references, force shutdown by dropping
-                    // The runtime will be dropped when the last Arc reference is dropped
-                    drop(arc);
-                }
-            }
+        // Shut down the Tokio runtime: cancels in-flight tasks at their await
+        // points and joins all worker threads, so no module code can still be
+        // running when GMod unloads the DLL
+        if let Some(runtime) = (*std::ptr::addr_of_mut!(RUNTIME)).take() {
+            runtime.shutdown_timeout(Duration::from_secs(1));
         }
 
         *std::ptr::addr_of_mut!(CLIENT) = None;

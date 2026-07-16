@@ -264,9 +264,8 @@ dependencies = [
 
 [[package]]
 name = "gmod"
-version = "17.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fba999064c8149319a285441ab101b47ded87bfbd6f58c3127a3f289e4d728c2"
+version = "17.0.1"
+source = "git+https://github.com/WilliamVenner/gmod-rs#a5aff25f33f59f59a633917393612e0e335863ae"
 dependencies = [
  "cstr",
  "gmod-macros",
@@ -277,8 +276,7 @@ dependencies = [
 [[package]]
 name = "gmod-macros"
 version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f379e64e2b37dc89becb8ac4e1a67211a1a8989b866a71d8365dc16459224a8"
+source = "git+https://github.com/WilliamVenner/gmod-rs#a5aff25f33f59f59a633917393612e0e335863ae"
 dependencies = [
  "proc-macro2",
  "quote",

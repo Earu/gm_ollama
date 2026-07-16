@@ -8,7 +8,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-gmod = { version = "*", default-features = false, features = ["gmcl"] }
+gmod = { git = "https://github.com/WilliamVenner/gmod-rs", default-features = false, features = ["gmcl"] }
 reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
 tokio = { version = "1.0", features = ["rt", "rt-multi-thread", "macros"] }
 serde = { version = "1.0", features = ["derive"] }
